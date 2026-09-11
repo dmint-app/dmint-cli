@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "dmint-cli"
 version = "0.1.0"
 description = "CLI tooling for Dmint policy creation, compilation, and management"
+license = "Apache-2.0"
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
