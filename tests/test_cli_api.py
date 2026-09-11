@@ -1,0 +1,106 @@
+"""Unit and security tests for OpenAI-compatible HTTP API client (src/dmint/cli/api.py)."""
+
+from io import BytesIO
+import json
+import unittest
+from unittest.mock import MagicMock, patch
+import urllib.error
+
+from dmint_cli.api import (
+    OpenAICompatClient,
+    extract_json_text,
+    mask_secret,
+    resolve_api_key,
+    resolve_base_url,
+)
+
+
+class CLIAPITests(unittest.TestCase):
+    def test_mask_secret(self):
+        self.assertEqual(mask_secret(None), "<none>")
+        self.assertEqual(mask_secret(""), "<none>")
+        self.assertEqual(mask_secret("12345"), "***")
+        self.assertEqual(mask_secret("sk-1234567890abcdef"), "sk-...cdef")
+
+    def test_resolve_base_url(self):
+        self.assertEqual(resolve_base_url(provider="gemini"), "https://generativelanguage.googleapis.com/v1beta/openai")
+        self.assertEqual(resolve_base_url(provider="groq"), "https://api.groq.com/openai/v1")
+        self.assertEqual(resolve_base_url(provider="ollama"), "http://localhost:11434/v1")
+        self.assertEqual(resolve_base_url("https://custom.api.com/v1/chat/completions"), "https://custom.api.com/v1")
+        self.assertEqual(resolve_base_url(), "https://api.openai.com/v1")
+
+    def test_resolve_api_key(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "env-key"}, clear=True):
+            self.assertEqual(resolve_api_key(None), "env-key")
+            self.assertEqual(resolve_api_key("explicit-key"), "explicit-key")
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "gemini-key"}, clear=True):
+            self.assertEqual(resolve_api_key(provider="gemini"), "gemini-key")
+
+    def test_extract_json_text(self):
+        raw_json = '{\n  "rules": []\n}'
+        self.assertEqual(extract_json_text(raw_json), raw_json)
+
+        markdown_json = "```json\n{\n  \"rules\": []\n}\n```"
+        self.assertEqual(extract_json_text(markdown_json), raw_json)
+
+        code_fence = "```\n{\n  \"rules\": []\n}\n```"
+        self.assertEqual(extract_json_text(code_fence), raw_json)
+
+    @patch("urllib.request.urlopen")
+    def test_successful_api_request(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "choices": [
+                {"message": {"content": '{"rules": [{"effect": "allow", "tool": "s", "action": "r"}]}'}}
+            ]
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        client = OpenAICompatClient(api_key="sk-test-key", model="gpt-4o-mini")
+        result = client.chat_completion([{"role": "user", "content": "hi"}])
+        self.assertIn('"effect": "allow"', result)
+
+    @patch("urllib.request.urlopen")
+    def test_api_non_2xx_response_masks_secret(self, mock_urlopen):
+        error_content = json.dumps({"error": {"message": "Invalid API key"}}).encode("utf-8")
+        err = urllib.error.HTTPError(
+            url="https://api.openai.com/v1/chat/completions",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=BytesIO(error_content),
+        )
+        mock_urlopen.side_effect = err
+
+        client = OpenAICompatClient(api_key="secret_api_key_12345")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertIn("HTTP 401", str(ctx.exception))
+        self.assertNotIn("secret_api_key_12345", str(ctx.exception))
+        self.assertIn("sec...2345", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_api_timeout_handling(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError("timed out")
+        client = OpenAICompatClient(api_key="key", timeout=1.0)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            client.chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertIn("API connection failed", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_malformed_json_api_response(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"NOT_JSON"
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        client = OpenAICompatClient(api_key="key")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.chat_completion([{"role": "user", "content": "hi"}])
+
+        self.assertIn("API response is not valid JSON", str(ctx.exception))
