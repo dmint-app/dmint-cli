@@ -4,15 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dmint-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLI tooling for Dmint policy creation, compilation, and management"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
     "dmint>=0.1.0,<0.2.0",
-    "dmint-skills>=0.1.0,<0.2.0",
 ]
+
+[tool.setuptools.package-data]
+"dmint_cli" = ["prompts/*.md"]
+"dmint_cli.prompts" = ["*.md"]
 
 [project.scripts]
 dmint = "dmint_cli.__main__:main"

@@ -104,3 +104,35 @@ class CLIAPITests(unittest.TestCase):
             client.chat_completion([{"role": "user", "content": "hi"}])
 
         self.assertIn("API response is not valid JSON", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_list_models_successful_parse(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "data": [
+                {"id": "gpt-4o"},
+                {"id": "gpt-4o-mini"},
+            ]
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        client = OpenAICompatClient(api_key="key")
+        models = client.list_models()
+        self.assertEqual(models, ["gpt-4o", "gpt-4o-mini"])
+
+    @patch("urllib.request.urlopen")
+    def test_list_models_404_or_unsupported_raises_error(self, mock_urlopen):
+        err = urllib.error.HTTPError(
+            url="http://localhost:11434/v1/models",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=BytesIO(b'{"error": "not found"}'),
+        )
+        mock_urlopen.side_effect = err
+
+        client = OpenAICompatClient(api_key="key")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.list_models()
+        self.assertIn("HTTP 404", str(ctx.exception))

@@ -1,4 +1,4 @@
-"""Unit and security tests for interactive policy wizard (src/dmint/cli/create_policy.py)."""
+"""Unit and security tests for interactive policy wizard (src/dmint_cli/create_policy.py)."""
 
 import contextlib
 import io
@@ -8,12 +8,16 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from dmint.policy import Policy
+from dmint_cli.compile_policy import (
+    CLIError,
+    JSONExtractionError,
+    PolicyValidationError,
+)
 from dmint_cli.create_policy import (
     main_create,
-    parse_tool_declarations_ast,
     run_create_policy_wizard,
 )
-from dmint.policy import Policy
 
 
 class PolicyCreateWizardTests(unittest.TestCase):
@@ -22,38 +26,69 @@ class PolicyCreateWizardTests(unittest.TestCase):
         self.base_path = Path(self.temp_dir.name)
         self.md_file = self.base_path / "access.md"
         self.json_file = self.base_path / "policy.json"
-        self.tool_file = self.base_path / "sqlite_server.py"
-        self.tool_file.write_text(
-            'types.Tool(name="read_data", description="Read records")\n'
-            'types.Tool(name="delete_data", description="Delete records")\n',
-            encoding="utf-8",
-        )
+        self.md_file.write_text("# Access Policy\n- Agents may read database records.", encoding="utf-8")
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_ast_tool_discovery_is_static_and_safe(self):
-        # Source file containing malicious executable code outside tool AST nodes
-        malicious_tool = self.base_path / "malicious.py"
-        malicious_tool.write_text(
-            'types.Tool(name="read_data", description="Safe tool")\n'
-            'raise RuntimeError("Code execution during import!")\n',
-            encoding="utf-8",
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_non_interactive_policy_ready_success(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.chat_completion.return_value = json.dumps({
+            "type": "policy_ready",
+            "rules": [{"effect": "allow", "tool": "postgres", "action": "query", "resource": "*"}]
+        })
+        mock_client_cls.return_value = mock_client
+
+        policy = run_create_policy_wizard(
+            access_md_file=self.md_file,
+            output_json_file=self.json_file,
+            api_key="sk-test",
+            non_interactive=True,
+            auto_confirm=True,
         )
 
-        # AST discovery MUST parse without triggering code execution (no RuntimeError raised)
-        tools = parse_tool_declarations_ast(malicious_tool)
-        self.assertEqual(len(tools), 1)
-        self.assertEqual(tools[0]["name"], "read_data")
+        self.assertIsInstance(policy, Policy)
+        self.assertEqual(len(policy.rules), 1)
+        self.assertTrue(self.json_file.exists())
 
-    @patch("dmint_cli.create_policy.compile_policy_file")
-    def test_run_wizard_non_interactive_creates_files(self, mock_compile):
-        mock_compile.return_value = Policy()
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_model_discovery_fallback_on_404(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.list_models.side_effect = RuntimeError("HTTP 404 Not Found")
+        mock_client.chat_completion.return_value = json.dumps({
+            "type": "policy_ready",
+            "rules": [{"effect": "allow", "tool": "postgres", "action": "query", "resource": "*"}]
+        })
+        mock_client_cls.return_value = mock_client
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            policy = run_create_policy_wizard(
-                tools_file=self.tool_file,
+            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="custom-model"):
+                policy = run_create_policy_wizard(
+                    access_md_file=self.md_file,
+                    output_json_file=self.json_file,
+                    api_key="sk-test",
+                    auto_confirm=True,
+                )
+
+        self.assertIsInstance(policy, Policy)
+        self.assertIn("[!] Could not list models", buf.getvalue())
+
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_envelope_parser_malformed_json_retries_and_fails(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.chat_completion.return_value = "NOT_JSON_RESPONSE"
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(JSONExtractionError):
+            run_create_policy_wizard(
                 access_md_file=self.md_file,
                 output_json_file=self.json_file,
                 api_key="sk-test",
@@ -61,30 +96,115 @@ class PolicyCreateWizardTests(unittest.TestCase):
                 auto_confirm=True,
             )
 
-        self.assertIsInstance(policy, Policy)
-        self.assertTrue(self.md_file.exists())
-        content = self.md_file.read_text()
-        self.assertIn("read_data", content)
-        self.assertIn("delete_data", content)
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_envelope_parser_unrecognized_type_retries_and_fails(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.chat_completion.return_value = json.dumps({"type": "unrecognized_type"})
+        mock_client_cls.return_value = mock_client
 
-    @patch("dmint_cli.create_policy.compile_policy_file")
-    def test_wizard_user_aborts_confirmation_does_not_write_final_json(self, mock_compile):
-        mock_compile.return_value = Policy()
+        with self.assertRaises(JSONExtractionError):
+            run_create_policy_wizard(
+                access_md_file=self.md_file,
+                output_json_file=self.json_file,
+                api_key="sk-test",
+                non_interactive=True,
+                auto_confirm=True,
+            )
+
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_clarification_loop_multi_turn_reaches_policy_ready(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.chat_completion.side_effect = [
+            json.dumps({"type": "clarification_needed", "questions": ["Question 1?"]}),
+            json.dumps({"type": "clarification_needed", "questions": ["Question 2?"]}),
+            json.dumps({"type": "policy_ready", "rules": [{"effect": "allow", "tool": "postgres", "action": "query"}]}),
+        ]
+        mock_client_cls.return_value = mock_client
+
+        policy = run_create_policy_wizard(
+            access_md_file=self.md_file,
+            output_json_file=self.json_file,
+            api_key="sk-test",
+            non_interactive=True,
+            auto_confirm=True,
+        )
+
+        self.assertIsInstance(policy, Policy)
+        self.assertEqual(mock_client.chat_completion.call_count, 3)
+
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_validation_retry_loop_recovers_on_second_attempt(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.chat_completion.side_effect = [
+            # First attempt returns invalid effect
+            json.dumps({"type": "policy_ready", "rules": [{"effect": "INVALID_EFFECT", "tool": "postgres", "action": "query"}]}),
+            # Second attempt returns valid policy
+            json.dumps({"type": "policy_ready", "rules": [{"effect": "allow", "tool": "postgres", "action": "query"}]}),
+        ]
+        mock_client_cls.return_value = mock_client
+
+        policy = run_create_policy_wizard(
+            access_md_file=self.md_file,
+            output_json_file=self.json_file,
+            api_key="sk-test",
+            non_interactive=True,
+            auto_confirm=True,
+        )
+
+        self.assertIsInstance(policy, Policy)
+        self.assertEqual(mock_client.chat_completion.call_count, 2)
+
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_validation_retry_loop_exhausts_cap_fails_closed(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        # Always returns invalid effect
+        mock_client.chat_completion.return_value = json.dumps({
+            "type": "policy_ready",
+            "rules": [{"effect": "INVALID_EFFECT", "tool": "postgres", "action": "query"}]
+        })
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(PolicyValidationError):
+            run_create_policy_wizard(
+                access_md_file=self.md_file,
+                output_json_file=self.json_file,
+                api_key="sk-test",
+                non_interactive=True,
+                auto_confirm=True,
+            )
+
+        self.assertFalse(self.json_file.exists())
+
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
+    def test_wizard_user_aborts_confirmation_does_not_write_final_json(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        mock_client.chat_completion.return_value = json.dumps({
+            "type": "policy_ready",
+            "rules": [{"effect": "allow", "tool": "postgres", "action": "query"}]
+        })
+        mock_client_cls.return_value = mock_client
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="n"):
-                with self.assertRaises(Exception):
+                with self.assertRaises(CLIError):
                     run_create_policy_wizard(
-                        tools_file=self.tool_file,
                         access_md_file=self.md_file,
                         output_json_file=self.json_file,
                         api_key="sk-test",
-                        non_interactive=False,
                         auto_confirm=False,
                     )
 
-        # Final policy.json MUST NOT exist when user denies confirmation
         self.assertFalse(self.json_file.exists())
 
     def test_cli_main_create_usage_error(self):
@@ -92,4 +212,3 @@ class PolicyCreateWizardTests(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             code = main_create([])
         self.assertEqual(code, 2)
-

@@ -154,6 +154,56 @@ class OpenAICompatClient:
 
         return extract_json_text(content)
 
+    def list_models(self) -> list[str]:
+        """Call GET {base_url}/models and return a list of available model IDs."""
+        endpoint = f"{self.base_url}/models"
+        headers = {
+            "User-Agent": "dmint-policy-author/0.1.0",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        req = urllib.request.Request(
+            endpoint,
+            headers=headers,
+            method="GET",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                resp_bytes = resp.read()
+                try:
+                    resp_data = json.loads(resp_bytes.decode("utf-8"))
+                except Exception as exc:
+                    raise RuntimeError("API response is not valid JSON") from exc
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read().decode("utf-8", errors="ignore")
+                error_json = json.loads(error_body)
+                msg = error_json.get("error", {}).get("message", error_body)
+            except Exception:
+                msg = f"HTTP Error {exc.code}"
+            masked_key = mask_secret(self.api_key)
+            raise RuntimeError(f"OpenAI-compatible API HTTP {exc.code}: {msg} (key: {masked_key})") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"API connection failed ({self.base_url}): {exc.reason}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"API request failed: {exc}") from exc
+
+        data = resp_data.get("data")
+        if not isinstance(data, list):
+            raise RuntimeError("API response missing 'data' array in models response")
+
+        models: list[str] = []
+        for item in data:
+            if isinstance(item, dict) and "id" in item and isinstance(item["id"], str):
+                models.append(item["id"])
+
+        if not models:
+            raise RuntimeError("No model IDs found in /models response")
+
+        return models
+
 
 def extract_json_text(text: str) -> str:
     """Extract clean JSON text, removing markdown code fences if present."""

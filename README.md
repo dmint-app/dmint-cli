@@ -1,22 +1,26 @@
-# dmint-cli
+# dmint-cli (v0.2.0)
 
-> **Developer tooling for creating, compiling, and validating Dmint security policies.**
+> **Developer tooling for interactive creation, compilation, and validation of Dmint security policies.**
 
-`dmint-cli` provides command-line utilities for discovering tools via AST analysis, gathering security requirements, and compiling natural language security rules into schema-compliant Dmint policy files (`policy.json`).
+`dmint-cli` provides command-line utilities for discovering tools via static AST analysis, interactive multi-turn policy authoring via LLM model selection and clarification loops, and deterministic schema/semantic policy verification (`policy.json`).
 
 ```text
 access.md (Human Security Intent)
        ↓
-dmint compile-policy / create-policy
+dmint create-policy (Multi-turn Wizard & Model Discovery)
        ↓
-LLM Compiler & Dmint Skill
+Self-Correcting LLM Loop (clarification_needed / policy_ready)
        ↓
 Dmint Core Validation (Policy.from_mapping)
+       ↓
+dmint verify-policy (Pure Deterministic Verification)
        ↓
 policy.json (Authoritative Policy)
 ```
 
 > **Note:** The CLI helps developers *author* and *validate* policies during development. `dmint` core remains the sole trusted runtime authorization engine.
+
+---
 
 ## Installation
 
@@ -24,23 +28,34 @@ policy.json (Authoritative Policy)
 pip install dmint-cli
 ```
 
+---
+
 ## CLI Commands
 
 ### 1. Interactive Policy Wizard (`dmint create-policy`)
 
-Inspect Python source code for tool declarations using AST analysis (zero execution), prompt the developer for security rules, and generate `access.md` + verified `policy.json`.
+Interactive, multi-turn wizard to create and validate a Dmint policy:
+- Interactive provider and model discovery (`list_models`).
+- AST-based static tool discovery via `--tools` parameter.
+- Multi-turn envelope output contract (`clarification_needed` & `policy_ready`).
+- Self-correcting validation retry loop on `PolicyError`.
+- Atomic file write and immediate verification.
 
 ```bash
-dmint create-policy --tools my_tools.py -f access.md -o policy.json
+dmint create-policy -f access.md -o policy.json --tools my_tools.py
 ```
 
-### 2. Policy Compiler (`dmint compile-policy`)
+### 2. Standalone Policy Verification (`dmint verify-policy`)
 
-Compile natural language security requirements into a strictly validated `policy.json` file using an OpenAI-compatible API or local fallback parser.
+Pure, deterministic schema and semantic validation of `policy.json` without LLM involvement. Returns exit code `0` on success or non-zero on validation failure:
 
 ```bash
-dmint compile-policy -f access.md -o policy.json
+dmint verify-policy policy.json
+# or
+dmint verify-policy -f policy.json
 ```
+
+---
 
 ## Environment Configuration
 
@@ -48,18 +63,22 @@ Set API credentials via environment variables for LLM policy compilation:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-# Optional custom provider / base URL
-export DMINT_BASE_URL="https://api.openai.com/v1"
-export DMINT_MODEL="gpt-4o-mini"
+# Optional custom providers (openai, gemini, groq, openrouter, ollama)
+export GEMINI_API_KEY="..."
+export GROQ_API_KEY="..."
 ```
+
+---
 
 ## Testing
 
 Run the CLI test suite:
 
 ```bash
-pytest -v
+python3 -m unittest discover -s tests -p "test_*.py"
 ```
+
+---
 
 ## License
 

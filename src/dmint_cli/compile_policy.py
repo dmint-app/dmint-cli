@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import os
 import sys
@@ -11,7 +12,6 @@ from pathlib import Path
 
 from dmint.policy import Policy, PolicyError
 from dmint_cli.api import OpenAICompatClient, mask_secret
-from dmint_skills.skill import DMINT_POLICY_SYSTEM_PROMPT
 
 
 class CLIError(Exception):
@@ -47,6 +47,15 @@ class OutputWriteError(CLIError):
         super().__init__(message, exit_code=7)
 
 
+def load_system_prompt() -> str:
+    """Load system prompt from bundled resource file."""
+    try:
+        return importlib.resources.files("dmint_cli.prompts").joinpath("policy_skill.md").read_text(encoding="utf-8")
+    except Exception:
+        prompt_path = Path(__file__).parent / "prompts" / "policy_skill.md"
+        return prompt_path.read_text(encoding="utf-8")
+
+
 def atomic_write_json(output_path: Path, data: dict) -> None:
     """Atomically write JSON to destination using temp file replace to prevent partial writes."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +84,6 @@ def compile_policy_file(
     model: str | None = None,
     provider: str | None = None,
     timeout: float = 60.0,
-    offline_fallback: bool = True,
 ) -> Policy:
     """Compile a natural language policy requirement file into a verified Dmint policy JSON file."""
     input_path = Path(input_file).resolve()
@@ -105,8 +113,10 @@ def compile_policy_file(
         timeout=timeout,
     )
 
+    system_prompt = load_system_prompt()
+
     messages = [
-        {"role": "system", "content": DMINT_POLICY_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": f"Convert the following natural language policy requirements into Dmint JSON policy format:\n\n{policy_text}",
@@ -116,34 +126,7 @@ def compile_policy_file(
     try:
         raw_json = client.chat_completion(messages, temperature=0.0)
     except Exception as exc:
-        if offline_fallback:
-            print(f"[!] API unavailable or key unconfigured ({exc}). Using deterministic policy compilation fallback...\n")
-            rules = []
-            seen_rules = set()
-            for line in policy_text.splitlines():
-                l = line.lower()
-                r = None
-                if "list_services" in l or "list services" in l:
-                    r = ("allow", "deployment", "list_services", "*")
-                elif "get_service_status" in l or "read service status" in l:
-                    r = ("allow", "deployment", "get_service_status", "*")
-                elif "deploy_service" in l or "deploy" in l:
-                    eff = "approval_required" if "approval" in l or "production" in l else "allow"
-                    r = (eff, "deployment", "deploy_service", "*")
-                elif "rollback_service" in l or "rollback" in l:
-                    r = ("approval_required", "deployment", "rollback_service", "*")
-                elif "scale_service" in l or "scale" in l:
-                    r = ("approval_required", "deployment", "scale_service", "*")
-                elif "delete_service" in l or "delete" in l:
-                    r = ("deny", "deployment", "delete_service", "*")
-
-                if r and r not in seen_rules:
-                    seen_rules.add(r)
-                    rules.append({"effect": r[0], "tool": r[1], "action": r[2], "resource": r[3]})
-
-            raw_json = json.dumps({"rules": rules})
-        else:
-            raise APIError(str(exc)) from exc
+        raise APIError(str(exc)) from exc
 
     try:
         policy_data = json.loads(raw_json)
