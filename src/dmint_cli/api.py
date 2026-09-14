@@ -1,7 +1,6 @@
 """Minimal OpenAI-compatible HTTP API client using Python standard library only.
 
-Supports OpenAI, Groq, DeepSeek, Together, Ollama, LM Studio, and Google Gemini
-via OpenAI-compatible /v1/chat/completions endpoints.
+Supports OpenAI, Google Gemini, Groq, OpenRouter, Ollama, and custom OpenAI-compatible endpoints.
 """
 
 from __future__ import annotations
@@ -109,7 +108,7 @@ class OpenAICompatClient:
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "dmint-policy-author/0.1.0",
+            "User-Agent": "dmint-policy-author/0.2.0",
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -158,7 +157,7 @@ class OpenAICompatClient:
         """Call GET {base_url}/models and return a list of available model IDs."""
         endpoint = f"{self.base_url}/models"
         headers = {
-            "User-Agent": "dmint-policy-author/0.1.0",
+            "User-Agent": "dmint-policy-author/0.2.0",
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

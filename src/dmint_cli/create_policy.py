@@ -12,16 +12,15 @@ from typing import Any
 
 from dmint.policy import Policy, PolicyError
 from dmint_cli.api import OpenAICompatClient, resolve_api_key
-from dmint_cli.compile_policy import (
+from dmint_cli.errors import (
     APIError,
     CLIError,
     InputFileError,
     JSONExtractionError,
     OutputWriteError,
     PolicyValidationError,
-    atomic_write_json,
-    load_system_prompt,
 )
+from dmint_cli.io_utils import atomic_write_json, load_system_prompt
 from dmint_cli.verify_policy import verify_policy_file
 
 
@@ -75,6 +74,37 @@ def parse_tool_declarations_ast(file_path: Path) -> list[dict[str, str]]:
     return discovered
 
 
+def discover_local_tools_ast(paths: list[Path | str]) -> list[dict[str, str]]:
+    """Safely inspect multiple file/directory paths for tool declarations using static AST parsing."""
+    discovered: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    file_paths: list[Path] = []
+    for p_raw in paths:
+        p = Path(p_raw).resolve()
+        if not p.exists():
+            print(f"[!] Warning: Path does not exist: {p}", file=sys.stderr)
+            continue
+        if p.is_file():
+            if p.suffix == ".py":
+                file_paths.append(p)
+        elif p.is_dir():
+            file_paths.extend(sorted(p.glob("**/*.py")))
+
+    for f_path in file_paths:
+        try:
+            tools = parse_tool_declarations_ast(f_path)
+            for t in tools:
+                key = f"{f_path.name}:{t['name']}"
+                if key not in seen:
+                    seen.add(key)
+                    discovered.append(t)
+        except Exception as exc:
+            print(f"[!] Warning: Could not parse AST for {f_path.name}: {exc}", file=sys.stderr)
+
+    return discovered
+
+
 def run_create_policy_wizard(
     *,
     access_md_file: str | Path,
@@ -106,20 +136,49 @@ def run_create_policy_wizard(
     if len(policy_text.encode("utf-8")) > 64 * 1024:
         raise InputFileError("input policy file exceeds 64KB size limit")
 
-    discovered_tools: list[dict[str, str]] = []
-    if tools_file:
-        t_path = Path(tools_file).resolve()
-        discovered_tools = parse_tool_declarations_ast(t_path)
-
-    if discovered_tools:
-        tools_summary = "\n".join(f"- {t['name']}: {t['description']}" for t in discovered_tools)
-        policy_text = f"[DISCOVERED TOOL DECLARATIONS VIA AST IN {Path(tools_file).name}]\n{tools_summary}\n\n[HUMAN SECURITY REQUIREMENTS]\n{policy_text}"
-
     is_tty = sys.stdin.isatty() and not non_interactive
 
     print("==================================================")
     print("      Dmint Interactive Policy Creation Wizard     ")
     print("==================================================")
+
+    # Mode selection prompt when running interactively without explicit mode flags
+    if is_tty and not tools_file:
+        print("What are you protecting?\n")
+        print("  1. External MCP server")
+        print("  2. Local tools/source\n")
+        mode_choice = input("Select mode [1/2, default 2]: ").strip()
+        if mode_choice == "1":
+            from dmint_cli.create_mcp_policy import run_create_mcp_policy_wizard
+            policy, _ = run_create_mcp_policy_wizard(
+                access_md_file=access_md_file,
+                output_json_file=output_json_file,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                non_interactive=non_interactive,
+                auto_confirm=auto_confirm,
+                timeout=timeout,
+            )
+            return policy
+
+        # Mode 2: Prompt for source paths (file(s) or directory(ies))
+        src_path_in = input("Enter source file(s) or directory path(s) [e.g. tools/ or main.py, utils.py]: ").strip()
+        if src_path_in:
+            raw_paths = [p.strip() for p in src_path_in.split(",") if p.strip()]
+            discovered_tools = discover_local_tools_ast(raw_paths)
+            if discovered_tools:
+                tools_summary = "\n".join(f"- {t['name']}: {t['description']}" for t in discovered_tools)
+                policy_text = f"[DISCOVERED TOOL DECLARATIONS VIA AST]\n{tools_summary}\n\n[HUMAN SECURITY REQUIREMENTS]\n{policy_text}"
+
+    discovered_tools: list[dict[str, str]] = []
+    if tools_file:
+        t_path = Path(tools_file).resolve()
+        discovered_tools = parse_tool_declarations_ast(t_path)
+        if discovered_tools:
+            tools_summary = "\n".join(f"- {t['name']}: {t['description']}" for t in discovered_tools)
+            policy_text = f"[DISCOVERED TOOL DECLARATIONS VIA AST IN {Path(tools_file).name}]\n{tools_summary}\n\n[HUMAN SECURITY REQUIREMENTS]\n{policy_text}"
 
     # 1. Provider & Key setup
     selected_provider = (provider or "").lower().strip()
@@ -350,8 +409,8 @@ def main_create(args: list[str] | None = None) -> int:
 
     try:
         parsed = parser.parse_args(args)
-    except SystemExit:
-        return 2
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 0
 
     try:
         run_create_policy_wizard(

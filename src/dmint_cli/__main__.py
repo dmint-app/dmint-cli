@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from dmint_cli.compile_policy import main_compile
+from dmint_cli.create_mcp_policy import main_create_mcp
 from dmint_cli.create_policy import main_create
 from dmint_cli.verify_policy import main_verify
 
@@ -14,14 +15,26 @@ def main(args: list[str] | None = None) -> int:
     if args is None:
         args = sys.argv[1:]
 
-    # Normalize two-word subcommands: "create policy" -> "create-policy", "verify policy" -> "verify-policy", etc.
+    # Normalize subcommands: "create policy" -> "create-policy", "create mcp policy" / "create-mcp-policy" / "protect-mcp" -> "create-mcp-policy"
     normalized_args: list[str] = []
     i = 0
     while i < len(args):
         arg = args[i]
+        if arg == "create" and i + 2 < len(args) and args[i + 1] == "mcp" and args[i + 2] == "policy":
+            normalized_args.append("create-mcp-policy")
+            i += 3
+            continue
         if arg == "create" and i + 1 < len(args) and args[i + 1] == "policy":
             normalized_args.append("create-policy")
             i += 2
+            continue
+        if arg == "create" and i + 1 < len(args) and args[i + 1] == "mcp-policy":
+            normalized_args.append("create-mcp-policy")
+            i += 2
+            continue
+        if arg == "protect-mcp":
+            normalized_args.append("create-mcp-policy")
+            i += 1
             continue
         if arg == "verify" and i + 1 < len(args) and args[i + 1] == "policy":
             normalized_args.append("verify-policy")
@@ -42,7 +55,12 @@ def main(args: list[str] | None = None) -> int:
 
     subparsers.add_parser(
         "create-policy",
-        help="Interactive wizard to create and validate Dmint policy files",
+        help="Interactive wizard to create and validate Dmint policy files (MCP or local tools)",
+        add_help=False,
+    )
+    subparsers.add_parser(
+        "create-mcp-policy",
+        help="Specialized wizard to discover tools from an existing MCP server, create Dmint policy, and generate protection artifacts",
         add_help=False,
     )
     subparsers.add_parser(
@@ -65,6 +83,8 @@ def main(args: list[str] | None = None) -> int:
 
     if cmd == "create-policy":
         return main_create(cmd_args)
+    elif cmd == "create-mcp-policy":
+        return main_create_mcp(cmd_args)
     elif cmd == "verify-policy":
         return main_verify(cmd_args)
     elif cmd == "compile-policy":

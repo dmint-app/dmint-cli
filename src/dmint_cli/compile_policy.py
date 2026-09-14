@@ -1,78 +1,21 @@
-"""Compile natural language policy requirements into a strictly validated Dmint policy.json file."""
+"""Thin compatibility wrapper for legacy compile-policy command."""
 
 from __future__ import annotations
 
 import argparse
-import importlib.resources
-import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
-from dmint.policy import Policy, PolicyError
-from dmint_cli.api import OpenAICompatClient, mask_secret
-
-
-class CLIError(Exception):
-    """Base CLI error with an explicit exit code."""
-
-    def __init__(self, message: str, exit_code: int = 1) -> None:
-        super().__init__(message)
-        self.exit_code = exit_code
-
-
-class InputFileError(CLIError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, exit_code=3)
-
-
-class APIError(CLIError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, exit_code=4)
-
-
-class JSONExtractionError(CLIError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, exit_code=5)
-
-
-class PolicyValidationError(CLIError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, exit_code=6)
-
-
-class OutputWriteError(CLIError):
-    def __init__(self, message: str) -> None:
-        super().__init__(message, exit_code=7)
-
-
-def load_system_prompt() -> str:
-    """Load system prompt from bundled resource file."""
-    try:
-        return importlib.resources.files("dmint_cli.prompts").joinpath("policy_skill.md").read_text(encoding="utf-8")
-    except Exception:
-        prompt_path = Path(__file__).parent / "prompts" / "policy_skill.md"
-        return prompt_path.read_text(encoding="utf-8")
-
-
-def atomic_write_json(output_path: Path, data: dict) -> None:
-    """Atomically write JSON to destination using temp file replace to prevent partial writes."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_fd, temp_path = tempfile.mkstemp(dir=output_path.parent, prefix=".policy_tmp_")
-    try:
-        with open(temp_fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, output_path)
-    except Exception as exc:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-        raise OutputWriteError(f"failed to write output policy file: {exc}") from exc
+from dmint.policy import Policy
+from dmint_cli.errors import (
+    APIError,
+    CLIError,
+    InputFileError,
+    JSONExtractionError,
+    OutputWriteError,
+    PolicyValidationError,
+)
+from dmint_cli.io_utils import atomic_write_json, load_system_prompt
 
 
 def compile_policy_file(
@@ -85,66 +28,20 @@ def compile_policy_file(
     provider: str | None = None,
     timeout: float = 60.0,
 ) -> Policy:
-    """Compile a natural language policy requirement file into a verified Dmint policy JSON file."""
-    input_path = Path(input_file).resolve()
-    output_path = Path(output_file).resolve()
+    """Thin compatibility wrapper delegating to create-policy non-interactive policy generation."""
+    from dmint_cli.create_policy import run_create_policy_wizard
 
-    if not input_path.exists():
-        raise InputFileError(f"input policy file not found: {input_path}")
-
-    try:
-        with open(input_path, "r", encoding="utf-8") as f:
-            policy_text = f.read().strip()
-    except Exception as exc:
-        raise InputFileError(f"failed to read input file: {exc}") from exc
-
-    if not policy_text:
-        raise InputFileError(f"input policy file is empty: {input_path}")
-
-    # Maximum payload size guard on input text (64KB)
-    if len(policy_text.encode("utf-8")) > 64 * 1024:
-        raise InputFileError("input policy file exceeds 64KB size limit")
-
-    client = OpenAICompatClient(
+    return run_create_policy_wizard(
+        access_md_file=input_file,
+        output_json_file=output_file,
         base_url=base_url,
         api_key=api_key,
         model=model,
         provider=provider,
+        non_interactive=True,
+        auto_confirm=True,
         timeout=timeout,
     )
-
-    system_prompt = load_system_prompt()
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": f"Convert the following natural language policy requirements into Dmint JSON policy format:\n\n{policy_text}",
-        },
-    ]
-
-    try:
-        raw_json = client.chat_completion(messages, temperature=0.0)
-    except Exception as exc:
-        raise APIError(str(exc)) from exc
-
-    try:
-        policy_data = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise JSONExtractionError(f"LLM generated invalid JSON: {exc}") from exc
-
-    # Strict Dmint core validation using Policy.from_mapping
-    try:
-        verified_policy = Policy.from_mapping(policy_data)
-    except PolicyError as exc:
-        raise PolicyValidationError(f"generated policy failed Dmint validation: {exc}") from exc
-    except Exception as exc:
-        raise PolicyValidationError(f"invalid policy structure: {exc}") from exc
-
-    # Atomic file output (never overwrites existing valid file if invalid)
-    atomic_write_json(output_path, policy_data)
-
-    return verified_policy
 
 
 def main_compile(args: list[str] | None = None) -> int:
@@ -162,8 +59,8 @@ def main_compile(args: list[str] | None = None) -> int:
 
     try:
         parsed = parser.parse_args(args)
-    except SystemExit:
-        return 2
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 0
 
     try:
         policy = compile_policy_file(

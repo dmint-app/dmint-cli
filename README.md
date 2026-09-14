@@ -1,21 +1,38 @@
-# dmint-cli (v0.2.0)
+# dmint-cli (v0.3.0)
 
 > **Developer tooling for interactive creation, compilation, and validation of Dmint security policies.**
 
-`dmint-cli` provides command-line utilities for discovering tools via static AST analysis, interactive multi-turn policy authoring via LLM model selection and clarification loops, and deterministic schema/semantic policy verification (`policy.json`).
+`dmint-cli` provides command-line utilities for discovering capabilities via static AST analysis (local source) or stdio protocol (external MCP servers), multi-turn policy authoring via LLMs, and deterministic policy verification (`policy.json`).
 
 ```text
-access.md (Human Security Intent)
-       ↓
-dmint create-policy (Multi-turn Wizard & Model Discovery)
-       ↓
-Self-Correcting LLM Loop (clarification_needed / policy_ready)
-       ↓
-Dmint Core Validation (Policy.from_mapping)
-       ↓
-dmint verify-policy (Pure Deterministic Verification)
-       ↓
-policy.json (Authoritative Policy)
+                             Dmint CLI
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                 │
+       create-policy     create-mcp-policy   verify-policy
+              │                 │                 │
+         ┌────┴────┐       MCP integrations   pure validation
+         │         │             │
+       Local      MCP            │
+       tools      tools          │
+         │         │             │
+         │      ┌──┴─────────────┴───────┐
+         │      │                        │
+       AST     stdio/local           remote MCP
+                │                        │
+                └──────────┬─────────────┘
+                           │
+                      tools/list
+                           │
+                  discovered capabilities
+                           │
+                      policy authoring
+                           │
+                     Policy.from_mapping()
+                           │
+                       policy.json
+                           │
+                  Dmint MCP protection
 ```
 
 > **Note:** The CLI helps developers *author* and *validate* policies during development. `dmint` core remains the sole trusted runtime authorization engine.
@@ -32,22 +49,36 @@ pip install dmint-cli
 
 ## CLI Commands
 
-### 1. Interactive Policy Wizard (`dmint create-policy`)
+### 1. General Policy Authoring Wizard (`dmint create-policy`)
 
-Interactive, multi-turn wizard to create and validate a Dmint policy:
-- Interactive provider and model discovery (`list_models`).
-- AST-based static tool discovery via `--tools` parameter.
+Interactive wizard to create and validate a Dmint policy for local source code or external MCP tools:
+- **Mode 1 (External MCP server)**: Connects to external MCP servers and discovers tools.
+- **Mode 2 (Local tools/source)**: Safely inspects single/multiple Python files or directories via static AST analysis (`ast.parse()`, zero code execution).
 - Multi-turn envelope output contract (`clarification_needed` & `policy_ready`).
 - Self-correcting validation retry loop on `PolicyError`.
-- Atomic file write and immediate verification.
 
 ```bash
-dmint create-policy -f access.md -o policy.json --tools my_tools.py
+dmint create-policy -f access.md -o policy.json --tools tools/
 ```
 
-### 2. Standalone Policy Verification (`dmint verify-policy`)
+### 2. Specialized MCP Policy & Protection Wizard (`dmint create-mcp-policy`)
 
-Pure, deterministic schema and semantic validation of `policy.json` without LLM involvement. Returns exit code `0` on success or non-zero on validation failure:
+Specialized wizard for existing external MCP servers:
+- Supports single or multiple MCP servers (`stdio` transport).
+- Discovers MCP tools over stdio protocol using the official MCP SDK.
+- Preserves integration namespace (`mcp.{integration_id}.{tool_name}`) so `postgres.query != analytics.query`.
+- Fails closed on unsupported remote transports (`remote-http` / `https://...`) as `dmint-mcp` runtime currently implements `stdio`.
+- Generates `policy.json` and multi-integration protection configuration `mcp_protection.json`.
+
+```bash
+dmint create-mcp-policy --command mcp-server-postgres --args postgresql://localhost/opshub_db
+```
+
+*Note:* `protect-mcp` is supported as an explicit compatibility alias to `create-mcp-policy`.
+
+### 3. Standalone Policy Verification (`dmint verify-policy`)
+
+Pure, deterministic schema and semantic validation of `policy.json` without LLM, network, or MCP involvement. Returns exit code `0` on success or non-zero on validation failure:
 
 ```bash
 dmint verify-policy policy.json
@@ -70,12 +101,18 @@ export GROQ_API_KEY="..."
 
 ---
 
-## Testing
+## Testing & Verification
 
 Run the CLI test suite:
 
 ```bash
 python3 -m unittest discover -s tests -p "test_*.py"
+```
+
+Build sdist and wheel:
+
+```bash
+python3 -m build
 ```
 
 ---

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from dmint.policy import Policy, PolicyError
-from dmint_cli.compile_policy import CLIError, InputFileError, JSONExtractionError, PolicyValidationError
+from dmint_cli.errors import CLIError, InputFileError, JSONExtractionError, PolicyValidationError
 
 
 def verify_policy_file(policy_file: str | Path) -> Policy:
@@ -67,8 +67,8 @@ def main_verify(args: list[str] | None = None) -> int:
 
     try:
         parsed = parser.parse_args(args)
-    except SystemExit:
-        return 2
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 0
 
     target_file = parsed.file_option or parsed.file
     if not target_file:

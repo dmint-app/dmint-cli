@@ -7,12 +7,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from dmint_cli.compile_policy import (
+    compile_policy_file,
+    main_compile,
+)
+from dmint_cli.errors import (
     CLIError,
     InputFileError,
     JSONExtractionError,
     PolicyValidationError,
-    compile_policy_file,
-    main_compile,
 )
 from dmint.policy import Policy, PolicyError
 
@@ -28,10 +30,13 @@ class PolicyCompilerTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    @patch("dmint_cli.compile_policy.OpenAICompatClient")
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_successful_policy_compilation_and_verification(self, mock_client_cls):
         mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
         mock_client.chat_completion.return_value = json.dumps({
+            "type": "policy_ready",
             "rules": [
                 {"effect": "allow", "tool": "customer", "action": "read", "resource": "*"}
             ]
@@ -67,20 +72,25 @@ class PolicyCompilerTests(unittest.TestCase):
         with self.assertRaises(InputFileError):
             compile_policy_file(input_file=huge_file, output_file=self.output_file, api_key="k")
 
-    @patch("dmint_cli.compile_policy.OpenAICompatClient")
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_malformed_llm_json_raises_extraction_error(self, mock_client_cls):
         mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
         mock_client.chat_completion.return_value = "NOT_JSON_AT_ALL"
         mock_client_cls.return_value = mock_client
 
         with self.assertRaises(JSONExtractionError):
             compile_policy_file(input_file=self.input_file, output_file=self.output_file, api_key="k")
 
-    @patch("dmint_cli.compile_policy.OpenAICompatClient")
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_invalid_policy_effect_fails_validation(self, mock_client_cls):
         mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
         # Invalid effect "ALLOWY"
         mock_client.chat_completion.return_value = json.dumps({
+            "type": "policy_ready",
             "rules": [
                 {"effect": "ALLOWY", "tool": "s", "action": "r"}
             ]
@@ -90,15 +100,17 @@ class PolicyCompilerTests(unittest.TestCase):
         with self.assertRaises(PolicyValidationError):
             compile_policy_file(input_file=self.input_file, output_file=self.output_file, api_key="k")
 
-    @patch("dmint_cli.compile_policy.OpenAICompatClient")
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_invalid_policy_does_not_overwrite_existing_valid_policy(self, mock_client_cls):
         # Existing valid policy.json
         valid_json = json.dumps({"rules": [{"effect": "deny", "tool": "s", "action": "a"}]})
         self.output_file.write_text(valid_json, encoding="utf-8")
 
         mock_client = MagicMock()
-        # Model returns invalid policy with unknown key
-        mock_client.chat_completion.return_value = json.dumps({"rules": [], "unknown_field": True})
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
+        # Model returns invalid policy effect
+        mock_client.chat_completion.return_value = json.dumps({"type": "policy_ready", "rules": [{"effect": "INVALID_EFFECT", "tool": "s", "action": "a"}]})
         mock_client_cls.return_value = mock_client
 
         with self.assertRaises(PolicyValidationError):
@@ -107,9 +119,11 @@ class PolicyCompilerTests(unittest.TestCase):
         # Verify existing valid policy was preserved
         self.assertEqual(self.output_file.read_text(), valid_json)
 
-    @patch("dmint_cli.compile_policy.OpenAICompatClient")
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_malicious_model_python_code_is_not_executed(self, mock_client_cls):
         mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
         # Model returns executable code attempt instead of JSON
         mock_client.chat_completion.return_value = "__import__('os').system('echo hacked')"
         mock_client_cls.return_value = mock_client
@@ -117,7 +131,7 @@ class PolicyCompilerTests(unittest.TestCase):
         with self.assertRaises(JSONExtractionError):
             compile_policy_file(input_file=self.input_file, output_file=self.output_file, api_key="k")
 
-    @patch("dmint_cli.compile_policy.OpenAICompatClient")
+    @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_prompt_injection_in_access_md_fails_closed(self, mock_client_cls):
         # Inject access.md with adversarial prompt injection
         injected = self.base_path / "injected.md"
@@ -127,8 +141,10 @@ class PolicyCompilerTests(unittest.TestCase):
         )
 
         mock_client = MagicMock()
+        mock_client.model = "gpt-4o-mini"
+        mock_client.base_url = "https://api.openai.com/v1"
         # Model returns invalid response or rule with unknown field
-        mock_client.chat_completion.return_value = json.dumps({"bad_schema": 1})
+        mock_client.chat_completion.return_value = json.dumps({"type": "policy_ready", "rules": [{"effect": "INVALID_EFFECT"}]})
         mock_client_cls.return_value = mock_client
 
         with self.assertRaises(PolicyValidationError):

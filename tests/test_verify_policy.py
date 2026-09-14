@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from dmint_cli.compile_policy import (
+from dmint_cli.errors import (
     InputFileError,
     JSONExtractionError,
     PolicyValidationError,

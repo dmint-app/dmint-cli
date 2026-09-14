@@ -9,13 +9,15 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from dmint.policy import Policy
-from dmint_cli.compile_policy import (
+from dmint_cli.errors import (
     CLIError,
     JSONExtractionError,
     PolicyValidationError,
 )
 from dmint_cli.create_policy import (
+    discover_local_tools_ast,
     main_create,
+    parse_tool_declarations_ast,
     run_create_policy_wizard,
 )
 
@@ -30,6 +32,43 @@ class PolicyCreateWizardTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_ast_tool_discovery_is_static_and_safe(self):
+        # Source file containing malicious executable code outside tool AST nodes
+        malicious_tool = self.base_path / "malicious.py"
+        malicious_tool.write_text(
+            'types.Tool(name="read_data", description="Safe tool")\n'
+            'raise RuntimeError("THIS MUST NEVER EXECUTE")\n',
+            encoding="utf-8",
+        )
+
+        # AST discovery MUST parse without triggering code execution (no RuntimeError raised)
+        tools = parse_tool_declarations_ast(malicious_tool)
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "read_data")
+
+    def test_ast_tool_discovery_multiple_files_and_directories(self):
+        tools_dir = self.base_path / "tools"
+        tools_dir.mkdir()
+        file1 = tools_dir / "github.py"
+        file2 = tools_dir / "database.py"
+
+        file1.write_text(
+            'types.Tool(name="create_issue", description="Create issue")\n'
+            'raise RuntimeError("THIS MUST NEVER EXECUTE IN FILE 1")\n',
+            encoding="utf-8",
+        )
+        file2.write_text(
+            'types.Tool(name="query_db", description="Query DB")\n'
+            'raise RuntimeError("THIS MUST NEVER EXECUTE IN FILE 2")\n',
+            encoding="utf-8",
+        )
+
+        discovered = discover_local_tools_ast([tools_dir])
+        self.assertEqual(len(discovered), 2)
+        names = {t["name"] for t in discovered}
+        self.assertIn("create_issue", names)
+        self.assertIn("query_db", names)
 
     @patch("dmint_cli.create_policy.OpenAICompatClient")
     def test_non_interactive_policy_ready_success(self, mock_client_cls):
